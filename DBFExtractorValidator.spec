@@ -15,7 +15,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['IPython', 'jedi', 'pytest', 'pygments', 'parso', 'sqlalchemy', 'lxml', 'matplotlib', 'scipy', 'imageio', 'tests'],
+    excludes=[],
     noarchive=False,
     optimize=0,
 )
