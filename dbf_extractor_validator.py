@@ -719,25 +719,19 @@ class ScrollableTable(ctk.CTkFrame):
         self.search_var.set("")
 
     def to_tsv(self):
-        """Tab-separated copy of the displayed columns (header + all rows)."""
+        """Tab-separated copy of the displayed columns (header + all rows).
+
+        Built with pandas vectorized to_csv so large tables copy fast without
+        blocking the UI thread.
+        """
         if self.source_df is None or self.source_df.empty or not self.columns:
             return ""
-        lines = ["\t".join(str(c) for c in self.columns)]
-        for pos in range(len(self.source_df)):
-            row = self.source_df.iloc[pos]
-            cells = []
-            for col in self.columns:
-                val = row.get(col, "")
-                if pd.notna(val):
-                    if isinstance(val, pd.Timestamp):
-                        val = val.strftime("%Y-%m-%d")
-                    else:
-                        val = str(val)
-                else:
-                    val = ""
-                cells.append(val)
-            lines.append("\t".join(cells))
-        return "\n".join(lines)
+        want = [c for c in self.columns if c in self.source_df.columns]
+        if not want:
+            return ""
+        txt = self.source_df[want].to_csv(sep="\t", index=False,
+                                          lineterminator="\n", na_rep="")
+        return txt.rstrip("\n")
 
 
 class RoleCheckMatrix(ctk.CTkScrollableFrame):
@@ -957,11 +951,11 @@ class WelcomeStep(ctk.CTkScrollableFrame):
         roles_box.pack(fill="x", padx=20, pady=(2, 0))
         ctk.CTkLabel(roles_box, text="Column Roles",
                      font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w")
-        ctk.CTkLabel(roles_box, text="Match = key compared against the Excel account column \u2022 Sum = totals you want \u2022 Type = optional group for the totals table (e.g. transactiontype)",
+        ctk.CTkLabel(roles_box, text="Match = key compared against the Excel account column \u2022 Sum = totals you want \u2022 Date = the column filtered by the date range \u2022 Type = optional group for the totals table (e.g. transactiontype)",
                      font=ctk.CTkFont(size=11), text_color="gray", wraplength=1000,
                      justify="left", anchor="w").pack(anchor="w")
-        self.roles = RoleCheckMatrix(roles_box, roles=("match", "sum", "type"),
-                                     single_select=("match", "type"),
+        self.roles = RoleCheckMatrix(roles_box, roles=("match", "sum", "date", "type"),
+                                     single_select=("match", "date", "type"),
                                      height=120, corner_radius=6)
         self.roles.pack(fill="x", pady=(4, 0))
         self.roles.on_change = self._on_roles_changed
@@ -1019,6 +1013,7 @@ class WelcomeStep(ctk.CTkScrollableFrame):
         self.roles.set_columns(cols, preselect={
             "match": roles["match"],
             "sum": roles["sums"],
+            "date": roles["date"],
             "type": roles["type"],
         })
         self.app.log_message(
@@ -1030,11 +1025,13 @@ class WelcomeStep(ctk.CTkScrollableFrame):
     def _on_roles_changed(self, selected):
         self.app.role_match_col = selected.get("match")
         self.app.role_sum_cols = list(selected.get("sum") or [])
+        self.app.role_date_col = selected.get("date")
         self.app.role_type_col = selected.get("type")
         self._update_mode_badge()
         self.app.log_message(
             f"Roles set | Match: {self.app.role_match_col or '-'} | "
             f"Sum: {', '.join(self.app.role_sum_cols) or '-'} | "
+            f"Date: {self.app.role_date_col or '-'} | "
             f"Type: {self.app.role_type_col or '-'}")
 
     def _update_mode_badge(self):
@@ -1044,9 +1041,9 @@ class WelcomeStep(ctk.CTkScrollableFrame):
                 else DBF_VALIDATOR_NAME)
         parts = [f"Validator: {name}"]
         if self.app.role_date_col:
-            parts.append(f"Filter column (auto-detected): {self.app.role_date_col}")
+            parts.append(f"Date filter -> {self.app.role_date_col}")
         else:
-            parts.append("No date column detected \u2014 records NOT date-filtered")
+            parts.append("No Date column selected \u2014 records NOT date-filtered")
         if self.app.role_match_col:
             parts.append(f"Match key -> {self.app.role_match_col}")
         if self.app.role_sum_cols:
@@ -1070,6 +1067,15 @@ class WelcomeStep(ctk.CTkScrollableFrame):
                 "Warning", "Tick a Match column first \u2014 that is the key "
                             "compared against the Excel account numbers.")
             return
+        if not self.app.role_date_col:
+            ok = messagebox.askyesno(
+                "No Date Column Selected",
+                "No Date column is ticked, so the From/To date range will not "
+                "filter any records.\n\nTick the Date column that should be "
+                "filtered (e.g. reportdate) to avoid that.\n\n"
+                "Continue without a Date column?")
+            if not ok:
+                return
         if self.cal_start.get_date() > self.cal_end.get_date():
             messagebox.showwarning("Warning", "Start date cannot be after the end date.")
             return
@@ -1439,16 +1445,25 @@ class ResultsStep(ctk.CTkFrame):
         self.app.populate_results(show_all=self._show_all)
 
     def _copy_table(self, table, name):
+        rows = 0 if table.source_df is None else len(table.source_df)
+        if table.source_df is None or table.source_df.empty or not table.columns:
+            messagebox.showinfo("Nothing to Copy",
+                                f"The {name} table is empty \u2014 nothing to copy yet.")
+            return
         text = table.to_tsv()
         if not text.strip():
+            messagebox.showinfo("Nothing to Copy",
+                                f"The {name} table is empty \u2014 nothing to copy yet.")
             return
         self.clipboard_clear()
         self.clipboard_append(text)
-        self.app.log_message(f"Copied {name} to clipboard.")
+        self.app.log_message(f"Copied {rows:,} rows ({name}) to clipboard.")
 
     def _copy_totals(self):
         totals = self.app._build_totals_df()
         if totals is None or totals.empty:
+            messagebox.showinfo("Nothing to Copy",
+                                "The Totals by Type table is empty \u2014 nothing to copy yet.")
             return
         lines = ["\t".join(str(c) for c in totals.columns)]
         for row in totals.itertuples(index=False):
@@ -1456,7 +1471,7 @@ class ResultsStep(ctk.CTkFrame):
         text = "\n".join(lines)
         self.clipboard_clear()
         self.clipboard_append(text)
-        self.app.log_message("Copied totals by type to clipboard.")
+        self.app.log_message(f"Copied totals by type ({len(lines) - 1} groups) to clipboard.")
 
     def restart(self):
         if messagebox.askyesno("Restart", "Start over from step 1?"):
